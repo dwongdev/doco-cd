@@ -44,6 +44,19 @@ func TestAutoDiscoveryConfigLabelDriftServices(t *testing.T) {
 			wantFirstLabel: expected,
 		},
 		{
+			// Serialization-only changes must not cause drift (#1818).
+			name: "same config, different key order",
+			status: map[docker.Service]docker.ServiceStatus{
+				"web": {
+					Labels: docker.Labels{
+						docker.DocoCDLabels.Deployment.AutoDiscoveryConfig: "{depth: 0, enabled: true, delete: false, remove_volumes: true, remove_images: true}",
+					},
+				},
+			},
+			wantServices:   nil,
+			wantFirstLabel: expected,
+		},
+		{
 			name: "mismatched labels",
 			status: map[docker.Service]docker.ServiceStatus{
 				"web": {
@@ -139,13 +152,20 @@ func TestAutoDiscoveryConfigLabelDriftServices(t *testing.T) {
 				expected = tt.expected
 			}
 
-			gotServices, gotFirst := autoDiscoveryConfigLabelDriftServices(tt.status, expected)
+			expectedCfg := docker.ParseAutoDiscoveryConfig(expected)
+
+			gotServices, gotFirst := autoDiscoveryConfigLabelDriftServices(tt.status, expectedCfg)
 			if !slices.Equal(gotServices, tt.wantServices) {
 				t.Fatalf("autoDiscoveryConfigLabelDriftServices() services = %v, want %v", gotServices, tt.wantServices)
 			}
 
-			if gotFirst != tt.wantFirstLabel {
-				t.Fatalf("autoDiscoveryConfigLabelDriftServices() first label = %q, want %q", gotFirst, tt.wantFirstLabel)
+			wantFirstLabel := tt.wantFirstLabel
+			if wantFirstLabel == expected {
+				wantFirstLabel = docker.MarshalAutoDiscoveryConfig(expectedCfg)
+			}
+
+			if gotFirst != wantFirstLabel {
+				t.Fatalf("autoDiscoveryConfigLabelDriftServices() first label = %q, want %q", gotFirst, wantFirstLabel)
 			}
 		})
 	}

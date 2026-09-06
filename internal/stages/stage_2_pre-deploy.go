@@ -17,6 +17,7 @@ import (
 	secrettypes "github.com/kimdre/doco-cd/internal/secretprovider/types"
 
 	"github.com/kimdre/doco-cd/internal/config"
+	deployConfig "github.com/kimdre/doco-cd/internal/config/deploy"
 	"github.com/kimdre/doco-cd/internal/docker"
 	"github.com/kimdre/doco-cd/internal/filesystem"
 	"github.com/kimdre/doco-cd/internal/git"
@@ -39,15 +40,12 @@ func shouldSkipDeployment(retryAfterFailure bool,
 		len(mismatchServices) == 0
 }
 
-func autoDiscoveryConfigLabelDriftServices(deployedStatus map[docker.Service]docker.ServiceStatus, expected string) ([]string, string) {
-	expected = strings.TrimSpace(expected)
-
+func autoDiscoveryConfigLabelDriftServices(deployedStatus map[docker.Service]docker.ServiceStatus, expectedCfg deployConfig.AutoDiscoveryConfig) ([]string, string) {
 	if len(deployedStatus) == 0 {
 		return nil, ""
 	}
 
 	affected := make([]string, 0, len(deployedStatus))
-	expectedCfg := docker.ParseAutoDiscoveryConfig(expected)
 
 	var firstObserved string
 
@@ -55,7 +53,10 @@ func autoDiscoveryConfigLabelDriftServices(deployedStatus map[docker.Service]doc
 		actual, ok := status.Labels[docker.DocoCDLabels.Deployment.AutoDiscoveryConfig]
 
 		actual = strings.TrimSpace(actual)
-		if ok && actual == expected {
+		deployedCfg := docker.ParseAutoDiscoveryConfig(actual)
+
+		// Ignore serialization-only differences (#1818).
+		if ok && docker.AutoDiscoveryConfigsEqual(deployedCfg, expectedCfg) {
 			continue
 		}
 
@@ -63,7 +64,6 @@ func autoDiscoveryConfigLabelDriftServices(deployedStatus map[docker.Service]doc
 		// cleanup reads containers labeled as auto-discovered. With auto-discovery off in
 		// both configs, including the legacy enabled label when the config label is absent,
 		// the config label is inert, so a changed default is no reason to recreate the stack.
-		deployedCfg := docker.ParseAutoDiscoveryConfig(actual)
 		legacyAutoDiscoveryEnabled, _ := strconv.ParseBool(status.Labels[docker.DocoCDLabels.Deployment.AutoDiscovery])
 
 		if !expectedCfg.Enabled && !deployedCfg.Enabled && (ok || !legacyAutoDiscoveryEnabled) {
@@ -78,7 +78,7 @@ func autoDiscoveryConfigLabelDriftServices(deployedStatus map[docker.Service]doc
 	}
 
 	if len(affected) == 0 {
-		return nil, expected
+		return nil, docker.MarshalAutoDiscoveryConfig(expectedCfg)
 	}
 
 	slices.Sort(affected)
@@ -204,18 +204,19 @@ func (s *StageManager) RunPreDeployStage(ctx context.Context, stageLog *slog.Log
 	// project would touch nothing. Force recreate so the retry re-runs it all.
 	retryForceRecreate := retryAfterFailure && lastFailure.Stage == string(StageDeploy)
 
-	expectedAutoDiscoveryLabel := docker.MarshalAutoDiscoveryConfig(s.DeployConfig.AutoDiscovery)
 	autoDiscoveryDriftServices, deployedAutoDiscoveryLabel := autoDiscoveryConfigLabelDriftServices(
 		deployedState.DeployedStatus,
-		expectedAutoDiscoveryLabel,
+		s.DeployConfig.AutoDiscovery,
 	)
 
 	autoDiscoveryConfigChanged := len(autoDiscoveryDriftServices) > 0
 	if autoDiscoveryConfigChanged {
 		stageLog.Debug("auto-discovery config label changed, proceeding with deployment",
 			slog.Any("affected_services", autoDiscoveryDriftServices),
-			slog.String("deployed_auto_discovery_config", deployedAutoDiscoveryLabel),
-			slog.String("expected_auto_discovery_config", expectedAutoDiscoveryLabel),
+			slog.Group("auto_discovery_config",
+				slog.String("deployed", deployedAutoDiscoveryLabel),
+				slog.String("expected", docker.MarshalAutoDiscoveryConfig(s.DeployConfig.AutoDiscovery)),
+			),
 		)
 	}
 
